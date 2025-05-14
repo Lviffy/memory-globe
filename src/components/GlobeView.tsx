@@ -2,59 +2,121 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Memory } from '../types';
 import { useMemories } from '../hooks/useMemories';
 import AddMemoryForm from './AddMemoryForm';
+// Import OpenGlobus types
+import type { Globe as OGGlobe, Vector, Planet } from '@openglobus/og';
 
 interface GlobeViewProps {
   onMemorySelect: (memory: Memory) => void;
 }
 
 const GlobeView: React.FC<GlobeViewProps> = ({ onMemorySelect }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wwd = useRef<any>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const globeRef = useRef<OGGlobe | null>(null);
+  const markerLayerRef = useRef<Vector | null>(null);
   const { memories } = useMemories();
   const [showAddForm, setShowAddForm] = useState(false);
   const [selectedPosition, setSelectedPosition] = useState<{ latitude: number; longitude: number } | null>(null);
 
   useEffect(() => {
-    // Import WorldWind dynamically to avoid SSR issues
+    // Import OpenGlobus dynamically to avoid SSR issues
     const initializeGlobe = async () => {
       try {
-        // @ts-ignore - WorldWind types are not available
-        const WorldWind = await import('worldwindjs');
+        // Import OpenGlobus dynamically
+        const { Globe, XYZ, GlobusRgbTerrain, Vector, control, events, LonLat } = await import('@openglobus/og');
         
-        if (canvasRef.current && !wwd.current) {
-          // Create the WorldWindow
-          wwd.current = new WorldWind.WorldWindow(canvasRef.current);
+        if (containerRef.current && !globeRef.current) {
+          // Create the OpenGlobus instance
+          globeRef.current = new Globe({
+            target: containerRef.current,
+            name: "Memory Globe",
+            terrain: new GlobusRgbTerrain(),
+            layers: [
+              new XYZ("OpenStreetMap", {
+                isBaseLayer: true,
+                url: "//{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                visibility: true,
+                attribution: 'Data © OpenStreetMap contributors, ODbL'
+              }),
+              // Adding a satellite imagery layer for more realistic view
+              new XYZ("Satellite", {
+                isBaseLayer: true,
+                url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                visibility: false,
+                attribution: 'Esri, DigitalGlobe, GeoEye, Earthstar Geographics'
+              })
+            ],
+            atmosphereEnabled: true,
+            // Add enhanced controls
+            controls: [
+              new control.MouseNavigation({
+                panKey: events?.KEY_ALT || 18,  // Alt key
+                zoomKey: events?.KEY_SHIFT || 16  // Shift key
+              }),
+              new control.KeyboardNavigation(),
+              new control.TouchNavigation(),
+              new control.ScaleControl(),
+              new control.EarthCoordinates(),
+              new control.CompassButton(),
+              new control.ZoomControl(),
+              new control.LayerSwitcher()
+            ]
+          });
 
-          // Add imagery layers
-          wwd.current.addLayer(new WorldWind.BMNGOneImageLayer());
-          wwd.current.addLayer(new WorldWind.BMNGLandsatLayer());
-          wwd.current.addLayer(new WorldWind.AtmosphereLayer());
-          wwd.current.addLayer(new WorldWind.StarFieldLayer());
-
-          // Create a layer to hold our markers
-          const markersLayer = new WorldWind.RenderableLayer("Markers");
-          wwd.current.addLayer(markersLayer);
-
-          // Initial position - view the whole Earth
-          wwd.current.navigator.range = WorldWind.WorldWindow.EARTH_RADIUS * 1.5;
-
-          // Add the click handler
-          wwd.current.addEventListener("click", handleGlobeClick);
+          // Create a vector layer for the memory markers
+          markerLayerRef.current = new Vector("Memories", {
+            pickingEnabled: true,
+            clampToGround: true,
+            zIndex: 10 // Keep above other layers
+          });
+          globeRef.current.planet.addLayer(markerLayerRef.current);
           
-          // Add markers for existing memories
+          // Add click handler to the vector layer
+          markerLayerRef.current.events.on("lclick", (e: any) => {
+            if (e.pickingObject && e.pickingObject.properties) {
+              const memoryId = e.pickingObject.properties.memoryId;
+              const memory = memories.find(m => m.id === memoryId);
+              if (memory) {
+                onMemorySelect(memory);
+                
+                // Fly to the memory location
+                if (globeRef.current && globeRef.current.planet) {
+                  flyToLocation(globeRef.current.planet, memory.longitude, memory.latitude);
+                }
+              }
+            }
+          });
+
+          // Set the initial view to a nice Earth perspective
+          setTimeout(() => {
+            if (globeRef.current && globeRef.current.planet) {
+              // Start with a nice view of Earth
+              globeRef.current.planet.camera.set(new LonLat(0, 20), 20000000);
+              globeRef.current.planet.camera.rotateGlobe(new LonLat(0, 20));
+            }
+          }, 100);
+          
+          // Set up click handler on the planet
+          globeRef.current.planet.events.on("lclick", handleGlobeClick);
+          
+          // Update markers with existing memories
           updateMarkers();
         }
       } catch (error) {
-        console.error("Failed to initialize WorldWind:", error);
+        console.error("Failed to initialize OpenGlobus:", error);
       }
     };
 
     initializeGlobe();
 
     return () => {
-      if (wwd.current) {
-        // Remove event listeners to avoid memory leaks
-        wwd.current.removeEventListener("click", handleGlobeClick);
+      if (globeRef.current) {
+        // Clean up OpenGlobus instance
+        if (globeRef.current.planet) {
+          globeRef.current.planet.events.off("lclick", handleGlobeClick);
+        }
+        // Destroy the globe to prevent memory leaks
+        globeRef.current.destroy();
+        globeRef.current = null;
       }
     };
   }, []);
@@ -63,65 +125,69 @@ const GlobeView: React.FC<GlobeViewProps> = ({ onMemorySelect }) => {
     updateMarkers();
   }, [memories]);
 
+  const flyToLocation = async (planet: Planet, lon: number, lat: number) => {
+    try {
+      const { LonLat } = await import('@openglobus/og');
+      const lonlat = new LonLat(lon, lat);
+      
+      // Fly to the location with animation
+      planet.camera.flyTo(lonlat, {
+        altitude: 1000000, // Altitude in meters
+        duration: 1.5,     // Animation duration in seconds
+        finishCallback: () => {
+          // Optional callback after animation completes
+        }
+      });
+    } catch (error) {
+      console.error("Failed to fly to location:", error);
+    }
+  };
+
   const updateMarkers = async () => {
-    if (!wwd.current) return;
+    if (!globeRef.current || !markerLayerRef.current) return;
     
     try {
-      // @ts-ignore - WorldWind types are not available
-      const WorldWind = await import('worldwindjs');
+      // Import OpenGlobus components dynamically
+      const { Entity, LonLat } = await import('@openglobus/og');
       
       // Clear existing markers
-      const markersLayer = wwd.current.layers.find((layer: any) => layer.displayName === "Markers");
-      if (markersLayer) {
-        markersLayer.removeAllRenderables();
-      }
+      markerLayerRef.current.clear();
 
       // Add markers for each memory
       memories.forEach((memory) => {
-        // Create placemarks for each memory
-        const placemark = new WorldWind.Placemark(
-          new WorldWind.Position(memory.latitude, memory.longitude, 0),
-          true,
-          null
-        );
-
-        // Define the placemark attributes
-        placemark.attributes = new WorldWind.PlacemarkAttributes();
-        placemark.attributes.imageSource = createMarkerImage(memory.title.charAt(0));
-        placemark.attributes.imageScale = 0.5;
-        placemark.attributes.imageOffset = new WorldWind.Offset(
-          WorldWind.OFFSET_FRACTION, 0.5,
-          WorldWind.OFFSET_FRACTION, 0.5
-        );
-        
-        // Highlight attributes
-        placemark.highlightAttributes = new WorldWind.PlacemarkAttributes(placemark.attributes);
-        placemark.highlightAttributes.imageScale = 0.7;
-
-        // Add user data for identification
-        placemark.userProperties = { memoryId: memory.id };
-
-        // Add the placemark to the layer
-        markersLayer.addRenderable(placemark);
-
-        // Add click handler for the placemark
-        wwd.current.addEventListener("click", (event: any) => {
-          const pickList = wwd.current.pick(wwd.current.canvasCoordinates(event.clientX, event.clientY));
-          if (pickList.objects.length > 0) {
-            for (let i = 0; i < pickList.objects.length; i++) {
-              const pickedObject = pickList.objects[i].userObject;
-              if (pickedObject && 
-                  pickedObject.userProperties && 
-                  pickedObject.userProperties.memoryId === memory.id) {
-                onMemorySelect(memory);
-              }
-            }
+        // Create entities for each memory
+        const entity = new Entity({
+          name: memory.title,
+          lonlat: new LonLat(memory.longitude, memory.latitude),
+          billboard: {
+            src: createMarkerImage(memory.title.charAt(0)),
+            width: 32,
+            height: 32,
+            offset: [0, 0],
+            scale: 1.0,
+            rotation: 0
+          },
+          label: {
+            text: memory.title,
+            fontSize: 12,
+            color: "white",
+            outline: true,
+            outlineColor: "black",
+            outlineWidth: 2,
+            offset: [0, 32] // Position the label below the marker
           }
         });
+
+        // Store the memory data with the entity for identification
+        entity.properties = {
+          memoryId: memory.id,
+          memory: memory
+        };
+
+        // Add the entity to the layer
+        markerLayerRef.current?.add(entity);
       });
 
-      // Redraw the globe
-      wwd.current.redraw();
     } catch (error) {
       console.error("Failed to update markers:", error);
     }
@@ -161,22 +227,23 @@ const GlobeView: React.FC<GlobeViewProps> = ({ onMemorySelect }) => {
     return canvas.toDataURL();
   };
 
-  const handleGlobeClick = (event: any) => {
-    if (!wwd.current) return;
+  const handleGlobeClick = (e: any) => {
+    if (!globeRef.current) return;
     
-    // Get the position of the click
-    const x = event.clientX;
-    const y = event.clientY;
+    // Check if we clicked on an entity
+    if (e.pickingObject) {
+      // If we clicked on an entity that represents a memory, 
+      // the memory selection will be handled by the entity's click event
+      return;
+    }
     
-    // Convert the screen coordinates to a geographic position
-    const pickList = wwd.current.pick(wwd.current.canvasCoordinates(x, y));
-    
-    // Check if we clicked on the globe
-    if (pickList.terrain) {
-      const position = pickList.terrain.position;
+    // If we clicked on the terrain
+    if (e.pickingObject === null && e.terrain) {
+      // Get the geographical coordinates of the click
+      const coords = e.terrain.lonlat;
       setSelectedPosition({
-        latitude: position.latitude,
-        longitude: position.longitude
+        latitude: coords.lat,
+        longitude: coords.lon
       });
       setShowAddForm(true);
     }
@@ -189,10 +256,10 @@ const GlobeView: React.FC<GlobeViewProps> = ({ onMemorySelect }) => {
 
   return (
     <>
-      <canvas 
-        ref={canvasRef} 
+      <div 
+        ref={containerRef} 
         className="w-full h-full bg-black"
-      />
+      ></div>
       
       {showAddForm && selectedPosition && (
         <div className="absolute top-0 left-0 w-full h-full bg-black bg-opacity-50 flex items-center justify-center z-50">

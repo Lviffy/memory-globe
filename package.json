@@ -10,12 +10,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@openglobus/og": "^0.25.6",
     "date-fns": "^2.30.0",
     "lucide-react": "^0.344.0",
     "nanoid": "^5.0.4",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "worldwindjs": "^1.7.0"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.9.1",
